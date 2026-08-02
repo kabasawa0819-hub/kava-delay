@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <title>KAVA DELAY｜フォーム確認モニター</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <p class="eyebrow">VOLLEYBALL FORM CHECK</p>
+        <h1>KAVA DELAY</h1>
+      </div>
+      <span id="status" class="status">停止中</span>
+    </header>
+
+    <section class="viewer" id="viewer" aria-label="遅延映像モニター">
+      <video id="live" autoplay muted playsinline></video>
+      <canvas id="delayed" width="960" height="540"></canvas>
+      <div class="badge"><span id="delayBadge">15</span>秒前</div>
+      <div id="message" class="message">「カメラ開始」を押してください</div>
+    </section>
+
+    <section class="controls">
+      <div class="delay-row" aria-label="遅延時間">
+        <button class="delay-btn" data-delay="5">5秒</button>
+        <button class="delay-btn" data-delay="10">10秒</button>
+        <button class="delay-btn active" data-delay="15">15秒</button>
+        <button class="delay-btn" data-delay="20">20秒</button>
+        <button class="delay-btn" data-delay="30">30秒</button>
+      </div>
+
+      <button id="startBtn" class="primary">カメラ開始</button>
+      <div class="grid">
+        <button id="switchBtn">カメラ切替</button>
+        <button id="mirrorBtn">左右反転：OFF</button>
+        <button id="freezeBtn">一時停止</button>
+        <button id="fullBtn">モニター全画面</button>
+      </div>
+      <p class="privacy">映像は送信・保存されません。端末内で一時処理し、古い映像から自動消去します。</p>
+    </section>
+
+    <details>
+      <summary>使い方</summary>
+      <ol>
+        <li>端末を三脚などで固定し、モニターやテレビへ必要に応じて接続します。</li>
+        <li>遅延時間を選び、「カメラ開始」を押します。</li>
+        <li>設定秒数がたつと、過去の映像が連続表示されます。</li>
+        <li>大画面表示では「モニター全画面」を押します。</li>
+      </ol>
+    </details>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
