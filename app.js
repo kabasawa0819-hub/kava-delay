@@ -29,13 +29,13 @@ let countdownTimer = null;
 let captureInFlight = false;
 let drawInFlight = false;
 
-// JPEG圧縮した静止フレームを5fpsで循環保持。
-// 30秒設定でもスマホ・タブレットのメモリを圧迫しにくい。
-const FPS = 5;
+// 素早いスポーツ動作を確認できるよう15fpsで循環保持する。
+// 端末の処理が追いつかない場合はcaptureInFlightにより自動で間引かれる。
+const FPS = 15;
 const FRAME_INTERVAL = Math.round(1000 / FPS);
 const MAX_EXTRA_SECONDS = 2;
-const MAX_WIDTH = 640;
-const JPEG_QUALITY = 0.62;
+const MAX_WIDTH = 720;
+const JPEG_QUALITY = 0.52;
 
 function clearCanvas() {
   ctx.fillStyle = '#000';
@@ -151,7 +151,7 @@ function startCountdown() {
       statusEl.textContent = `${delaySeconds}秒遅延・準備中`;
     } else {
       message.hidden = true;
-      statusEl.textContent = `${delaySeconds}秒前を再生中`;
+      statusEl.textContent = `${delaySeconds}秒前を滑らか再生中`;
       clearInterval(countdownTimer);
       countdownTimer = null;
     }
@@ -236,7 +236,7 @@ freezeBtn.addEventListener('click', () => {
   if (!running) return;
   frozen = !frozen;
   freezeBtn.textContent = frozen ? '再開' : '一時停止';
-  statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を再生中`;
+  statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を滑らか再生中`;
 });
 
 function setMonitorMode(enabled) {
@@ -252,8 +252,6 @@ fullBtn.addEventListener('click', async () => {
     return;
   }
   setMonitorMode(true);
-  // iPhone/iPadでは任意要素のFullscreen APIが使えない場合があるため、
-  // 先にCSSで全面表示し、対応端末だけ本当の全画面も要求する。
   try {
     if (viewer.requestFullscreen) await viewer.requestFullscreen();
     else if (viewer.webkitRequestFullscreen) viewer.webkitRequestFullscreen();
