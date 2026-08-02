@@ -1,0 +1,9 @@
+{
+  "name": "KAVA DELAY フォーム確認モニター",
+  "short_name": "KAVA DELAY",
+  "start_url": "./",
+  "display": "browser",
+  "background_color": "#070b14",
+  "theme_color": "#111827",
+  "description": "カメラ映像を設定秒数遅らせて表示する、フォーム確認用Webアプリ"
+}
