@@ -14,6 +14,10 @@ const message = document.querySelector('#message');
 const statusEl = document.querySelector('#status');
 const delayBadge = document.querySelector('#delayBadge');
 const viewer = document.querySelector('#viewer');
+const playState = document.querySelector('#playState');
+const playStateText = document.querySelector('#playStateText');
+const brightnessRange = document.querySelector('#brightnessRange');
+const brightnessValue = document.querySelector('#brightnessValue');
 const delayButtons = [...document.querySelectorAll('.delay-btn')];
 
 let delaySeconds = 15;
@@ -51,6 +55,20 @@ function setControlsBusy(busy) {
   delayButtons.forEach(button => { button.disabled = busy; });
 }
 
+function setPlaybackState(text = '', visible = false, paused = false) {
+  playStateText.textContent = text;
+  playState.hidden = !visible;
+  playState.classList.toggle('paused', paused);
+}
+
+function applyBrightness(value) {
+  const safeValue = Math.min(180, Math.max(80, Number(value) || 120));
+  brightnessRange.value = String(safeValue);
+  brightnessValue.value = `${safeValue}%`;
+  document.documentElement.style.setProperty('--video-brightness', String(safeValue / 100));
+  try { localStorage.setItem('kava-delay-brightness', String(safeValue)); } catch (_) {}
+}
+
 function clearCanvas() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -78,9 +96,6 @@ function resetBuffer() {
 function trimBuffer(now = performance.now()) {
   const cutoff = now - (delaySeconds + MAX_EXTRA_SECONDS) * 1000;
   while (frames.length && frames[0].at < cutoff) revokeFrame(frames.shift());
-
-  // 容量不足で「古い側」を削ると設定遅延を守れなくなるため、
-  // 上限到達時は新規取得を一時的に間引く。古い必要フレームは残す。
 }
 
 function waitForVideoMetadata(video, timeoutMs = 4000) {
@@ -211,6 +226,7 @@ function stopLoops() {
 function startCountdown() {
   firstCaptureAt = 0;
   message.hidden = false;
+  setPlaybackState('', false);
   clearInterval(countdownTimer);
   countdownTimer = window.setInterval(() => {
     if (!running) return;
@@ -228,12 +244,14 @@ function startCountdown() {
     } else if (frames.some(frame => frame.at <= performance.now() - delaySeconds * 1000)) {
       message.hidden = true;
       statusEl.textContent = `${delaySeconds}秒前を再生中`;
+      setPlaybackState(`${delaySeconds}秒遅延・再生中`, true);
       clearInterval(countdownTimer);
       countdownTimer = null;
     } else if (totalBytes >= MAX_BUFFER_BYTES) {
       message.hidden = false;
       message.textContent = 'この端末では容量が足りません。遅延時間を短くしてください。';
       statusEl.textContent = '端末容量不足';
+      setPlaybackState('', false);
     }
   }, 200);
 }
@@ -336,11 +354,13 @@ async function stopCamera() {
   statusEl.textContent = '停止中';
   message.hidden = false;
   message.textContent = '「カメラ開始」を押してください';
+  setPlaybackState('', false);
 }
 
 function showError(error) {
   console.error(error);
   message.hidden = false;
+  setPlaybackState('', false);
   if (error?.name === 'NotAllowedError') {
     message.textContent = 'カメラが許可されていません。ブラウザの設定でカメラを許可してください。';
   } else if (error?.name === 'NotFoundError') {
@@ -391,6 +411,11 @@ freezeBtn.addEventListener('click', () => {
   frozen = !frozen;
   freezeBtn.textContent = frozen ? '再開' : '一時停止';
   statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を再生中`;
+  setPlaybackState(
+    frozen ? `${delaySeconds}秒遅延・一時停止` : `${delaySeconds}秒遅延・再生中`,
+    true,
+    frozen
+  );
 });
 
 function setMonitorMode(enabled) {
@@ -399,8 +424,9 @@ function setMonitorMode(enabled) {
   fullBtn.textContent = enabled ? '通常画面へ戻る' : 'モニター全画面';
 }
 
-viewer.addEventListener('click', async () => {
+viewer.addEventListener('click', async event => {
   if (!monitorMode) return;
+  if (event.target.closest('.play-state')) return;
   if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
   setMonitorMode(false);
 });
@@ -434,6 +460,10 @@ delayButtons.forEach(btn => btn.addEventListener('click', async () => {
   await captureFrame();
 }));
 
+brightnessRange.addEventListener('input', event => {
+  applyBrightness(event.target.value);
+});
+
 document.addEventListener('visibilitychange', async () => {
   if (!running) return;
   if (document.visibilityState === 'visible') {
@@ -451,5 +481,9 @@ window.addEventListener('keydown', event => {
   if (event.key === 'Escape' && monitorMode) setMonitorMode(false);
 });
 
+let savedBrightness = 120;
+try { savedBrightness = Number(localStorage.getItem('kava-delay-brightness')) || 120; } catch (_) {}
+applyBrightness(savedBrightness);
 clearCanvas();
+setPlaybackState('', false);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(console.warn);
