@@ -23,31 +23,45 @@ let frozen = false;
 let mirrored = false;
 let monitorMode = false;
 let frames = [];
+let totalBytes = 0;
 let captureTimer = null;
 let playbackTimer = null;
 let countdownTimer = null;
-let captureInFlight = false;
-let drawInFlight = false;
 let sessionId = 0;
+let captureBusySession = null;
+let drawBusySession = null;
+let wakeLock = null;
+let firstCaptureAt = 0;
 
-// 素早いスポーツ動作を確認できるよう15fpsで循環保持する。
-// 端末の処理が追いつかない場合はcaptureInFlightにより自動で間引かれる。
 const FPS = 15;
 const FRAME_INTERVAL = Math.round(1000 / FPS);
 const MAX_EXTRA_SECONDS = 2;
 const MAX_WIDTH = 720;
 const JPEG_QUALITY = 0.52;
+const MAX_BUFFER_BYTES = 48 * 1024 * 1024;
 
 function clearCanvas() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
 
+function revokeFrame(frame) {
+  if (!frame) return;
+  if (frame.url) URL.revokeObjectURL(frame.url);
+  totalBytes = Math.max(0, totalBytes - (frame.bytes || 0));
+}
+
 function releaseFrames() {
-  for (const frame of frames) {
-    if (frame.url) URL.revokeObjectURL(frame.url);
-  }
+  for (const frame of frames) revokeFrame(frame);
   frames = [];
+  totalBytes = 0;
+}
+
+function trimBuffer(now = performance.now()) {
+  const cutoff = now - (delaySeconds + MAX_EXTRA_SECONDS) * 1000;
+  while (frames.length && (frames[0].at < cutoff || totalBytes > MAX_BUFFER_BYTES)) {
+    revokeFrame(frames.shift());
+  }
 }
 
 function fitCanvasToVideo() {
@@ -63,41 +77,46 @@ function fitCanvasToVideo() {
 
 function canvasToBlob(canvasEl) {
   return new Promise((resolve, reject) => {
-    canvasEl.toBlob(blob => blob ? resolve(blob) : reject(new Error('映像の一時変換に失敗しました。')), 'image/jpeg', JPEG_QUALITY);
+    canvasEl.toBlob(
+      blob => blob ? resolve(blob) : reject(new Error('映像の一時変換に失敗しました。')),
+      'image/jpeg',
+      JPEG_QUALITY
+    );
   });
 }
 
 async function captureFrame() {
-  if (!running || live.readyState < 2 || captureInFlight) return;
   const mySession = sessionId;
-  captureInFlight = true;
+  if (!running || live.readyState < 2 || captureBusySession === mySession) return;
+
+  captureBusySession = mySession;
+  const capturedAt = performance.now();
   try {
-    captureCtx.save();
     captureCtx.setTransform(1, 0, 0, 1, 0, 0);
     captureCtx.drawImage(live, 0, 0, captureCanvas.width, captureCanvas.height);
-    captureCtx.restore();
     const blob = await canvasToBlob(captureCanvas);
-    if (!running || mySession !== sessionId) return;
-    const url = URL.createObjectURL(blob);
-    frames.push({ url, at: performance.now(), session: mySession });
 
-    const cutoff = performance.now() - (delaySeconds + MAX_EXTRA_SECONDS) * 1000;
-    while (frames.length && frames[0].at < cutoff) {
-      const old = frames.shift();
-      URL.revokeObjectURL(old.url);
-    }
+    if (!running || mySession !== sessionId) return;
+
+    const url = URL.createObjectURL(blob);
+    frames.push({ url, at: capturedAt, bytes: blob.size, session: mySession });
+    totalBytes += blob.size;
+    if (!firstCaptureAt) firstCaptureAt = capturedAt;
+    trimBuffer();
   } catch (error) {
     console.warn('Frame capture skipped:', error);
   } finally {
-    captureInFlight = false;
+    if (captureBusySession === mySession) captureBusySession = null;
   }
 }
 
-async function drawFrameUrl(url) {
+async function drawFrameUrl(url, mySession) {
   const img = new Image();
   img.decoding = 'async';
   img.src = url;
   await img.decode();
+  if (!running || mySession !== sessionId) return;
+
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   if (mirrored) {
@@ -109,26 +128,26 @@ async function drawFrameUrl(url) {
 }
 
 async function drawDelayedFrame() {
-  if (!running || frozen || !frames.length || drawInFlight) return;
   const mySession = sessionId;
+  if (!running || frozen || !frames.length || drawBusySession === mySession) return;
+
   const target = performance.now() - delaySeconds * 1000;
   let selected = null;
   while (frames.length && frames[0].at <= target) {
     const ready = frames.shift();
-    if (selected) URL.revokeObjectURL(selected.url);
+    if (selected) revokeFrame(selected);
     selected = ready;
   }
   if (!selected) return;
 
-  drawInFlight = true;
+  drawBusySession = mySession;
   try {
-    await drawFrameUrl(selected.url);
-    if (!running || mySession !== sessionId) return;
+    await drawFrameUrl(selected.url, mySession);
   } catch (error) {
     console.warn('Frame draw skipped:', error);
   } finally {
-    URL.revokeObjectURL(selected.url);
-    drawInFlight = false;
+    revokeFrame(selected);
+    if (drawBusySession === mySession) drawBusySession = null;
   }
 }
 
@@ -145,31 +164,54 @@ function stopLoops() {
 }
 
 function startCountdown() {
-  const startedAt = performance.now();
+  firstCaptureAt = 0;
   message.hidden = false;
+  clearInterval(countdownTimer);
   countdownTimer = window.setInterval(() => {
     if (!running) return;
-    const elapsed = (performance.now() - startedAt) / 1000;
+    if (!firstCaptureAt) {
+      message.textContent = 'カメラ映像を準備しています';
+      return;
+    }
+    const elapsed = (performance.now() - firstCaptureAt) / 1000;
     const left = Math.max(0, Math.ceil(delaySeconds - elapsed));
     if (left > 0) {
       message.textContent = `${left}秒後に遅延映像が始まります`;
       statusEl.textContent = `${delaySeconds}秒遅延・準備中`;
     } else {
       message.hidden = true;
-      statusEl.textContent = `${delaySeconds}秒前を滑らか再生中`;
+      statusEl.textContent = `${delaySeconds}秒前を再生中`;
       clearInterval(countdownTimer);
       countdownTimer = null;
     }
   }, 200);
 }
 
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator) || !running || document.visibilityState !== 'visible') return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch (error) {
+    console.warn('Wake Lock unavailable:', error);
+  }
+}
+
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try { await wakeLock.release(); } catch (_) {}
+  wakeLock = null;
+}
+
 async function startCamera() {
   await stopCamera();
-  sessionId += 1;
+  const mySession = ++sessionId;
+
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('このブラウザはカメラに対応していません。SafariまたはChromeを最新版にしてください。');
   }
-  stream = await navigator.mediaDevices.getUserMedia({
+
+  const newStream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: { ideal: facingMode },
       width: { ideal: 1280 },
@@ -178,32 +220,45 @@ async function startCamera() {
     },
     audio: false
   });
+
+  if (mySession !== sessionId) {
+    newStream.getTracks().forEach(track => track.stop());
+    return;
+  }
+
+  stream = newStream;
   live.srcObject = stream;
   await live.play();
+  if (mySession !== sessionId) return;
+
   fitCanvasToVideo();
   running = true;
   frozen = false;
   freezeBtn.textContent = '一時停止';
   startBtn.textContent = '停止';
   startBtn.classList.add('running');
+  startCountdown();
   startLoops();
   await captureFrame();
-  startCountdown();
+  await requestWakeLock();
 }
 
 async function stopCamera() {
-  sessionId += 1;
+  ++sessionId;
   running = false;
-  captureInFlight = false;
-  drawInFlight = false;
+  frozen = false;
   stopLoops();
+  await releaseWakeLock();
+
   if (stream) stream.getTracks().forEach(track => track.stop());
   stream = null;
   live.srcObject = null;
   releaseFrames();
   clearCanvas();
+
   startBtn.textContent = 'カメラ開始';
   startBtn.classList.remove('running');
+  freezeBtn.textContent = '一時停止';
   statusEl.textContent = '停止中';
   message.hidden = false;
   message.textContent = '「カメラ開始」を押してください';
@@ -216,6 +271,8 @@ function showError(error) {
     message.textContent = 'カメラが許可されていません。ブラウザの設定でカメラを許可してください。';
   } else if (error?.name === 'NotFoundError') {
     message.textContent = '使用できるカメラが見つかりません。';
+  } else if (error?.name === 'NotReadableError') {
+    message.textContent = 'ほかのアプリがカメラを使用中です。カメラアプリなどを閉じてください。';
   } else {
     message.textContent = error?.message || 'エラーが発生しました。';
   }
@@ -223,15 +280,29 @@ function showError(error) {
 }
 
 startBtn.addEventListener('click', async () => {
-  try { running ? await stopCamera() : await startCamera(); }
-  catch (error) { await stopCamera(); showError(error); }
+  startBtn.disabled = true;
+  try {
+    running ? await stopCamera() : await startCamera();
+  } catch (error) {
+    await stopCamera();
+    showError(error);
+  } finally {
+    startBtn.disabled = false;
+  }
 });
 
 switchBtn.addEventListener('click', async () => {
   facingMode = facingMode === 'environment' ? 'user' : 'environment';
   if (!running) return;
-  try { await startCamera(); }
-  catch (error) { await stopCamera(); showError(error); }
+  switchBtn.disabled = true;
+  try {
+    await startCamera();
+  } catch (error) {
+    await stopCamera();
+    showError(error);
+  } finally {
+    switchBtn.disabled = false;
+  }
 });
 
 mirrorBtn.addEventListener('click', () => {
@@ -243,7 +314,7 @@ freezeBtn.addEventListener('click', () => {
   if (!running) return;
   frozen = !frozen;
   freezeBtn.textContent = frozen ? '再開' : '一時停止';
-  statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を滑らか再生中`;
+  statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を再生中`;
 });
 
 function setMonitorMode(enabled) {
@@ -282,14 +353,20 @@ document.querySelectorAll('.delay-btn').forEach(btn => btn.addEventListener('cli
   delayBadge.textContent = String(delaySeconds);
   document.querySelectorAll('.delay-btn').forEach(b => b.classList.toggle('active', b === btn));
   if (!running) return;
+
   releaseFrames();
   clearCanvas();
-  clearInterval(countdownTimer);
-  await captureFrame();
   startCountdown();
+  await captureFrame();
 }));
 
-window.addEventListener('pagehide', stopCamera);
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && running) {
+    await requestWakeLock();
+  }
+});
+
+window.addEventListener('pagehide', () => { stopCamera(); });
 window.addEventListener('keydown', event => {
   if (event.key === 'Escape' && monitorMode) setMonitorMode(false);
 });
