@@ -14,6 +14,7 @@ const message = document.querySelector('#message');
 const statusEl = document.querySelector('#status');
 const delayBadge = document.querySelector('#delayBadge');
 const viewer = document.querySelector('#viewer');
+const delayButtons = [...document.querySelectorAll('.delay-btn')];
 
 let delaySeconds = 15;
 let facingMode = 'environment';
@@ -28,17 +29,27 @@ let captureTimer = null;
 let playbackTimer = null;
 let countdownTimer = null;
 let sessionId = 0;
-let captureBusySession = null;
-let drawBusySession = null;
+let bufferId = 0;
+let captureBusyKey = null;
+let drawBusyKey = null;
 let wakeLock = null;
 let firstCaptureAt = 0;
+let operationBusy = false;
+let trackEndedHandler = null;
 
 const FPS = 15;
 const FRAME_INTERVAL = Math.round(1000 / FPS);
 const MAX_EXTRA_SECONDS = 2;
-const MAX_WIDTH = 720;
-const JPEG_QUALITY = 0.52;
+const MAX_WIDTH = 640;
+const JPEG_QUALITY = 0.46;
 const MAX_BUFFER_BYTES = 48 * 1024 * 1024;
+
+function setControlsBusy(busy) {
+  operationBusy = busy;
+  startBtn.disabled = busy;
+  switchBtn.disabled = busy;
+  delayButtons.forEach(button => { button.disabled = busy; });
+}
 
 function clearCanvas() {
   ctx.fillStyle = '#000';
@@ -57,21 +68,48 @@ function releaseFrames() {
   totalBytes = 0;
 }
 
+function resetBuffer() {
+  bufferId += 1;
+  firstCaptureAt = 0;
+  releaseFrames();
+  clearCanvas();
+}
+
 function trimBuffer(now = performance.now()) {
   const cutoff = now - (delaySeconds + MAX_EXTRA_SECONDS) * 1000;
-  while (frames.length && (frames[0].at < cutoff || totalBytes > MAX_BUFFER_BYTES)) {
-    revokeFrame(frames.shift());
-  }
+  while (frames.length && frames[0].at < cutoff) revokeFrame(frames.shift());
+
+  // 容量不足で「古い側」を削ると設定遅延を守れなくなるため、
+  // 上限到達時は新規取得を一時的に間引く。古い必要フレームは残す。
+}
+
+function waitForVideoMetadata(video, timeoutMs = 4000) {
+  if (video.videoWidth && video.videoHeight) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('カメラ映像の準備に時間がかかっています。もう一度開始してください。'));
+    }, timeoutMs);
+    const onReady = () => { cleanup(); resolve(); };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      video.removeEventListener('loadedmetadata', onReady);
+      video.removeEventListener('resize', onReady);
+    };
+    video.addEventListener('loadedmetadata', onReady, { once: true });
+    video.addEventListener('resize', onReady, { once: true });
+  });
 }
 
 function fitCanvasToVideo() {
   const sourceWidth = live.videoWidth || 1280;
   const sourceHeight = live.videoHeight || 720;
   const scale = Math.min(1, MAX_WIDTH / sourceWidth);
-  const width = Math.max(320, Math.round(sourceWidth * scale));
+  const width = Math.max(240, Math.round(sourceWidth * scale));
   const height = Math.max(180, Math.round(sourceHeight * scale));
   canvas.width = captureCanvas.width = width;
   canvas.height = captureCanvas.height = height;
+  viewer.style.aspectRatio = `${width} / ${height}`;
   clearCanvas();
 }
 
@@ -87,35 +125,39 @@ function canvasToBlob(canvasEl) {
 
 async function captureFrame() {
   const mySession = sessionId;
-  if (!running || live.readyState < 2 || captureBusySession === mySession) return;
+  const myBuffer = bufferId;
+  const busyKey = `${mySession}:${myBuffer}`;
+  if (!running || live.readyState < 2 || captureBusyKey === busyKey) return;
+  if (totalBytes >= MAX_BUFFER_BYTES) return;
 
-  captureBusySession = mySession;
+  captureBusyKey = busyKey;
   const capturedAt = performance.now();
   try {
     captureCtx.setTransform(1, 0, 0, 1, 0, 0);
     captureCtx.drawImage(live, 0, 0, captureCanvas.width, captureCanvas.height);
     const blob = await canvasToBlob(captureCanvas);
 
-    if (!running || mySession !== sessionId) return;
+    if (!running || mySession !== sessionId || myBuffer !== bufferId) return;
+    if (totalBytes + blob.size > MAX_BUFFER_BYTES) return;
 
     const url = URL.createObjectURL(blob);
-    frames.push({ url, at: capturedAt, bytes: blob.size, session: mySession });
+    frames.push({ url, at: capturedAt, bytes: blob.size, session: mySession, buffer: myBuffer });
     totalBytes += blob.size;
     if (!firstCaptureAt) firstCaptureAt = capturedAt;
     trimBuffer();
   } catch (error) {
     console.warn('Frame capture skipped:', error);
   } finally {
-    if (captureBusySession === mySession) captureBusySession = null;
+    if (captureBusyKey === busyKey) captureBusyKey = null;
   }
 }
 
-async function drawFrameUrl(url, mySession) {
+async function drawFrameUrl(url, mySession, myBuffer) {
   const img = new Image();
   img.decoding = 'async';
   img.src = url;
   await img.decode();
-  if (!running || mySession !== sessionId) return;
+  if (!running || mySession !== sessionId || myBuffer !== bufferId) return;
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -129,7 +171,9 @@ async function drawFrameUrl(url, mySession) {
 
 async function drawDelayedFrame() {
   const mySession = sessionId;
-  if (!running || frozen || !frames.length || drawBusySession === mySession) return;
+  const myBuffer = bufferId;
+  const busyKey = `${mySession}:${myBuffer}`;
+  if (!running || frozen || !frames.length || drawBusyKey === busyKey) return;
 
   const target = performance.now() - delaySeconds * 1000;
   let selected = null;
@@ -140,18 +184,19 @@ async function drawDelayedFrame() {
   }
   if (!selected) return;
 
-  drawBusySession = mySession;
+  drawBusyKey = busyKey;
   try {
-    await drawFrameUrl(selected.url, mySession);
+    await drawFrameUrl(selected.url, mySession, myBuffer);
   } catch (error) {
     console.warn('Frame draw skipped:', error);
   } finally {
     revokeFrame(selected);
-    if (drawBusySession === mySession) drawBusySession = null;
+    if (drawBusyKey === busyKey) drawBusyKey = null;
   }
 }
 
 function startLoops() {
+  stopLoops();
   captureTimer = window.setInterval(captureFrame, FRAME_INTERVAL);
   playbackTimer = window.setInterval(drawDelayedFrame, FRAME_INTERVAL);
 }
@@ -170,7 +215,9 @@ function startCountdown() {
   countdownTimer = window.setInterval(() => {
     if (!running) return;
     if (!firstCaptureAt) {
-      message.textContent = 'カメラ映像を準備しています';
+      message.textContent = totalBytes >= MAX_BUFFER_BYTES
+        ? '端末の一時容量が不足しています。遅延時間を短くしてください。'
+        : 'カメラ映像を準備しています';
       return;
     }
     const elapsed = (performance.now() - firstCaptureAt) / 1000;
@@ -178,17 +225,21 @@ function startCountdown() {
     if (left > 0) {
       message.textContent = `${left}秒後に遅延映像が始まります`;
       statusEl.textContent = `${delaySeconds}秒遅延・準備中`;
-    } else {
+    } else if (frames.some(frame => frame.at <= performance.now() - delaySeconds * 1000)) {
       message.hidden = true;
       statusEl.textContent = `${delaySeconds}秒前を再生中`;
       clearInterval(countdownTimer);
       countdownTimer = null;
+    } else if (totalBytes >= MAX_BUFFER_BYTES) {
+      message.hidden = false;
+      message.textContent = 'この端末では容量が足りません。遅延時間を短くしてください。';
+      statusEl.textContent = '端末容量不足';
     }
   }, 200);
 }
 
 async function requestWakeLock() {
-  if (!('wakeLock' in navigator) || !running || document.visibilityState !== 'visible') return;
+  if (!('wakeLock' in navigator) || !running || document.visibilityState !== 'visible' || wakeLock) return;
   try {
     wakeLock = await navigator.wakeLock.request('screen');
     wakeLock.addEventListener('release', () => { wakeLock = null; });
@@ -201,6 +252,19 @@ async function releaseWakeLock() {
   if (!wakeLock) return;
   try { await wakeLock.release(); } catch (_) {}
   wakeLock = null;
+}
+
+function attachTrackEndedHandler(activeStream, mySession) {
+  const track = activeStream.getVideoTracks()[0];
+  if (!track) return;
+  trackEndedHandler = async () => {
+    if (mySession !== sessionId || !running) return;
+    await stopCamera();
+    message.hidden = false;
+    message.textContent = 'カメラが停止しました。「カメラ開始」を押して再開してください。';
+    statusEl.textContent = 'カメラ停止';
+  };
+  track.addEventListener('ended', trackEndedHandler, { once: true });
 }
 
 async function startCamera() {
@@ -229,14 +293,20 @@ async function startCamera() {
   stream = newStream;
   live.srcObject = stream;
   await live.play();
-  if (mySession !== sessionId) return;
+  await waitForVideoMetadata(live);
+  if (mySession !== sessionId) {
+    newStream.getTracks().forEach(track => track.stop());
+    return;
+  }
 
   fitCanvasToVideo();
+  resetBuffer();
   running = true;
   frozen = false;
   freezeBtn.textContent = '一時停止';
   startBtn.textContent = '停止';
   startBtn.classList.add('running');
+  attachTrackEndedHandler(stream, mySession);
   startCountdown();
   startLoops();
   await captureFrame();
@@ -250,11 +320,15 @@ async function stopCamera() {
   stopLoops();
   await releaseWakeLock();
 
-  if (stream) stream.getTracks().forEach(track => track.stop());
+  if (stream) {
+    const track = stream.getVideoTracks()[0];
+    if (track && trackEndedHandler) track.removeEventListener('ended', trackEndedHandler);
+    stream.getTracks().forEach(item => item.stop());
+  }
+  trackEndedHandler = null;
   stream = null;
   live.srcObject = null;
-  releaseFrames();
-  clearCanvas();
+  resetBuffer();
 
   startBtn.textContent = 'カメラ開始';
   startBtn.classList.remove('running');
@@ -280,28 +354,30 @@ function showError(error) {
 }
 
 startBtn.addEventListener('click', async () => {
-  startBtn.disabled = true;
+  if (operationBusy) return;
+  setControlsBusy(true);
   try {
     running ? await stopCamera() : await startCamera();
   } catch (error) {
     await stopCamera();
     showError(error);
   } finally {
-    startBtn.disabled = false;
+    setControlsBusy(false);
   }
 });
 
 switchBtn.addEventListener('click', async () => {
+  if (operationBusy) return;
   facingMode = facingMode === 'environment' ? 'user' : 'environment';
   if (!running) return;
-  switchBtn.disabled = true;
+  setControlsBusy(true);
   try {
     await startCamera();
   } catch (error) {
     await stopCamera();
     showError(error);
   } finally {
-    switchBtn.disabled = false;
+    setControlsBusy(false);
   }
 });
 
@@ -311,7 +387,7 @@ mirrorBtn.addEventListener('click', () => {
 });
 
 freezeBtn.addEventListener('click', () => {
-  if (!running) return;
+  if (!running || operationBusy) return;
   frozen = !frozen;
   freezeBtn.textContent = frozen ? '再開' : '一時停止';
   statusEl.textContent = frozen ? '映像を一時停止中' : `${delaySeconds}秒前を再生中`;
@@ -339,34 +415,38 @@ fullBtn.addEventListener('click', async () => {
   try {
     if (viewer.requestFullscreen) await viewer.requestFullscreen();
     else if (viewer.webkitRequestFullscreen) viewer.webkitRequestFullscreen();
-  } catch (_) {
-    // CSSモニターモードは維持する。
-  }
+  } catch (_) {}
 });
 
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement && monitorMode) setMonitorMode(false);
 });
 
-document.querySelectorAll('.delay-btn').forEach(btn => btn.addEventListener('click', async () => {
+delayButtons.forEach(btn => btn.addEventListener('click', async () => {
+  if (operationBusy) return;
   delaySeconds = Number(btn.dataset.delay);
   delayBadge.textContent = String(delaySeconds);
-  document.querySelectorAll('.delay-btn').forEach(b => b.classList.toggle('active', b === btn));
+  delayButtons.forEach(button => button.classList.toggle('active', button === btn));
   if (!running) return;
 
-  releaseFrames();
-  clearCanvas();
+  resetBuffer();
   startCountdown();
   await captureFrame();
 }));
 
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible' && running) {
+  if (!running) return;
+  if (document.visibilityState === 'visible') {
+    resetBuffer();
+    startCountdown();
+    await captureFrame();
     await requestWakeLock();
+  } else {
+    await releaseWakeLock();
   }
 });
 
-window.addEventListener('pagehide', () => { stopCamera(); });
+window.addEventListener('pagehide', () => { void stopCamera(); });
 window.addEventListener('keydown', event => {
   if (event.key === 'Escape' && monitorMode) setMonitorMode(false);
 });
