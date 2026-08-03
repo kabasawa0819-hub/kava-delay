@@ -28,6 +28,7 @@ let playbackTimer = null;
 let countdownTimer = null;
 let captureInFlight = false;
 let drawInFlight = false;
+let sessionId = 0;
 
 // 素早いスポーツ動作を確認できるよう15fpsで循環保持する。
 // 端末の処理が追いつかない場合はcaptureInFlightにより自動で間引かれる。
@@ -68,6 +69,7 @@ function canvasToBlob(canvasEl) {
 
 async function captureFrame() {
   if (!running || live.readyState < 2 || captureInFlight) return;
+  const mySession = sessionId;
   captureInFlight = true;
   try {
     captureCtx.save();
@@ -75,8 +77,9 @@ async function captureFrame() {
     captureCtx.drawImage(live, 0, 0, captureCanvas.width, captureCanvas.height);
     captureCtx.restore();
     const blob = await canvasToBlob(captureCanvas);
+    if (!running || mySession !== sessionId) return;
     const url = URL.createObjectURL(blob);
-    frames.push({ url, at: performance.now() });
+    frames.push({ url, at: performance.now(), session: mySession });
 
     const cutoff = performance.now() - (delaySeconds + MAX_EXTRA_SECONDS) * 1000;
     while (frames.length && frames[0].at < cutoff) {
@@ -107,6 +110,7 @@ async function drawFrameUrl(url) {
 
 async function drawDelayedFrame() {
   if (!running || frozen || !frames.length || drawInFlight) return;
+  const mySession = sessionId;
   const target = performance.now() - delaySeconds * 1000;
   let selected = null;
   while (frames.length && frames[0].at <= target) {
@@ -119,6 +123,7 @@ async function drawDelayedFrame() {
   drawInFlight = true;
   try {
     await drawFrameUrl(selected.url);
+    if (!running || mySession !== sessionId) return;
   } catch (error) {
     console.warn('Frame draw skipped:', error);
   } finally {
@@ -160,6 +165,7 @@ function startCountdown() {
 
 async function startCamera() {
   await stopCamera();
+  sessionId += 1;
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('このブラウザはカメラに対応していません。SafariまたはChromeを最新版にしてください。');
   }
@@ -186,6 +192,7 @@ async function startCamera() {
 }
 
 async function stopCamera() {
+  sessionId += 1;
   running = false;
   captureInFlight = false;
   drawInFlight = false;
@@ -244,6 +251,12 @@ function setMonitorMode(enabled) {
   document.body.classList.toggle('monitor-mode', enabled);
   fullBtn.textContent = enabled ? '通常画面へ戻る' : 'モニター全画面';
 }
+
+viewer.addEventListener('click', async () => {
+  if (!monitorMode) return;
+  if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+  setMonitorMode(false);
+});
 
 fullBtn.addEventListener('click', async () => {
   if (monitorMode) {
