@@ -40,13 +40,14 @@ let wakeLock = null;
 let firstCaptureAt = 0;
 let operationBusy = false;
 let trackEndedHandler = null;
+let playbackStarted = false;
 
 const FPS = 15;
 const FRAME_INTERVAL = Math.round(1000 / FPS);
 const MAX_EXTRA_SECONDS = 2;
-const MAX_WIDTH = 640;
-const JPEG_QUALITY = 0.46;
-const MAX_BUFFER_BYTES = 48 * 1024 * 1024;
+const MAX_WIDTH = 960;
+const JPEG_QUALITY = 0.60;
+const MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
 function setControlsBusy(busy) {
   operationBusy = busy;
@@ -89,6 +90,7 @@ function releaseFrames() {
 function resetBuffer() {
   bufferId += 1;
   firstCaptureAt = 0;
+  playbackStarted = false;
   releaseFrames();
   clearCanvas();
 }
@@ -172,7 +174,7 @@ async function drawFrameUrl(url, mySession, myBuffer) {
   img.decoding = 'async';
   img.src = url;
   await img.decode();
-  if (!running || mySession !== sessionId || myBuffer !== bufferId) return;
+  if (!running || mySession !== sessionId || myBuffer !== bufferId) return false;
 
   ctx.save();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -182,6 +184,17 @@ async function drawFrameUrl(url, mySession, myBuffer) {
   }
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   ctx.restore();
+  return true;
+}
+
+function markPlaybackStarted() {
+  if (playbackStarted) return;
+  playbackStarted = true;
+  message.hidden = true;
+  statusEl.textContent = `${delaySeconds}秒前を再生中`;
+  setPlaybackState(`${delaySeconds}秒遅延・再生中`, true);
+  clearInterval(countdownTimer);
+  countdownTimer = null;
 }
 
 async function drawDelayedFrame() {
@@ -201,7 +214,8 @@ async function drawDelayedFrame() {
 
   drawBusyKey = busyKey;
   try {
-    await drawFrameUrl(selected.url, mySession, myBuffer);
+    const drawn = await drawFrameUrl(selected.url, mySession, myBuffer);
+    if (drawn) markPlaybackStarted();
   } catch (error) {
     console.warn('Frame draw skipped:', error);
   } finally {
@@ -225,11 +239,12 @@ function stopLoops() {
 
 function startCountdown() {
   firstCaptureAt = 0;
+  playbackStarted = false;
   message.hidden = false;
   setPlaybackState('', false);
   clearInterval(countdownTimer);
   countdownTimer = window.setInterval(() => {
-    if (!running) return;
+    if (!running || playbackStarted) return;
     if (!firstCaptureAt) {
       message.textContent = totalBytes >= MAX_BUFFER_BYTES
         ? '端末の一時容量が不足しています。遅延時間を短くしてください。'
@@ -241,17 +256,12 @@ function startCountdown() {
     if (left > 0) {
       message.textContent = `${left}秒後に遅延映像が始まります`;
       statusEl.textContent = `${delaySeconds}秒遅延・準備中`;
-    } else if (frames.some(frame => frame.at <= performance.now() - delaySeconds * 1000)) {
-      message.hidden = true;
-      statusEl.textContent = `${delaySeconds}秒前を再生中`;
-      setPlaybackState(`${delaySeconds}秒遅延・再生中`, true);
-      clearInterval(countdownTimer);
-      countdownTimer = null;
-    } else if (totalBytes >= MAX_BUFFER_BYTES) {
-      message.hidden = false;
-      message.textContent = 'この端末では容量が足りません。遅延時間を短くしてください。';
-      statusEl.textContent = '端末容量不足';
-      setPlaybackState('', false);
+    } else {
+      message.textContent = '遅延映像を開始しています';
+      if (totalBytes >= MAX_BUFFER_BYTES) {
+        message.textContent = 'この端末では容量が足りません。遅延時間を短くしてください。';
+        statusEl.textContent = '端末容量不足';
+      }
     }
   }, 200);
 }
@@ -296,8 +306,8 @@ async function startCamera() {
   const newStream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: { ideal: facingMode },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
       frameRate: { ideal: 30, max: 30 }
     },
     audio: false
